@@ -129,16 +129,53 @@ func runScan(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Println("LLM connection successful!")
 
-	// Initialize Docker runtime
-	fmt.Println("Initializing Docker runtime...")
-	dockerConfig := runtime.DefaultDockerConfig()
-	dockerConfig.Image = cfg.DockerImage
-	dockerRuntime := runtime.NewDockerRuntime(dockerConfig)
+	// Initialize tool registry first (needed for local tool server)
+	fmt.Println("Initializing tools...")
+	reg := registry.NewRegistry()
+
+	// Register all tools
+	browserManager := browser.NewBrowserManager(nil)
+	for _, tool := range browserManager.GetTools() {
+		reg.Register(tool)
+	}
+
+	terminalManager := terminal.NewTerminalManager(nil)
+	for _, tool := range terminalManager.GetTools() {
+		reg.Register(tool)
+	}
+
+	proxyManager := proxy.NewProxyManager(nil)
+	for _, tool := range proxyManager.GetTools() {
+		reg.Register(tool)
+	}
+
+	pythonManager := python.NewPythonManager(nil)
+	for _, tool := range pythonManager.GetTools() {
+		reg.Register(tool)
+	}
+
+	agentsGraph := agentsgraph.NewAgentsGraph()
+	graphManager := agentsgraph.NewAgentsGraphManager(agentsGraph)
+	for _, tool := range graphManager.GetTools() {
+		reg.Register(tool)
+	}
+
+	registerVulnerabilityTool(reg)
+	fmt.Printf("Registered %d tools\n", reg.Count())
+
+	// Initialize Docker runtime or local tool server
+	var dockerRuntime *runtime.DockerRuntime
+	var localToolServer *runtime.LocalToolServer
 
 	if !cfg.UseLocalTools {
+		fmt.Println("Initializing Docker runtime...")
+		dockerConfig := runtime.DefaultDockerConfig()
+		dockerConfig.Image = cfg.DockerImage
+		dockerRuntime = runtime.NewDockerRuntime(dockerConfig)
+
 		if err := dockerRuntime.Start(ctx); err != nil {
 			fmt.Printf("Warning: Failed to start Docker runtime: %v\n", err)
-			fmt.Println("Falling back to local execution mode")
+			fmt.Println("Starting local tool server instead...")
 			cfg.UseLocalTools = true
 		} else {
 			defer dockerRuntime.Close()
@@ -146,55 +183,17 @@ func runScan(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Initialize tool registry
-	fmt.Println("Initializing tools...")
-	reg := registry.NewRegistry()
-
-	// Register browser tools
-	browserManager := browser.NewBrowserManager(nil)
-	for _, tool := range browserManager.GetTools() {
-		if err := reg.Register(tool); err != nil {
-			fmt.Printf("Warning: Failed to register browser tool: %v\n", err)
+	// Start local tool server if needed
+	if cfg.UseLocalTools {
+		fmt.Println("Starting local tool server...")
+		localToolServer = runtime.NewLocalToolServer(8000, reg)
+		if err := localToolServer.Start(ctx); err != nil {
+			fmt.Printf("Warning: Failed to start local tool server: %v\n", err)
+		} else {
+			defer localToolServer.Stop(ctx)
+			fmt.Printf("Local tool server running at %s\n", localToolServer.GetURL())
 		}
 	}
-
-	// Register terminal tools
-	terminalManager := terminal.NewTerminalManager(nil)
-	for _, tool := range terminalManager.GetTools() {
-		if err := reg.Register(tool); err != nil {
-			fmt.Printf("Warning: Failed to register terminal tool: %v\n", err)
-		}
-	}
-
-	// Register proxy tools
-	proxyManager := proxy.NewProxyManager(nil)
-	for _, tool := range proxyManager.GetTools() {
-		if err := reg.Register(tool); err != nil {
-			fmt.Printf("Warning: Failed to register proxy tool: %v\n", err)
-		}
-	}
-
-	// Register Python tools
-	pythonManager := python.NewPythonManager(nil)
-	for _, tool := range pythonManager.GetTools() {
-		if err := reg.Register(tool); err != nil {
-			fmt.Printf("Warning: Failed to register Python tool: %v\n", err)
-		}
-	}
-
-	// Register agents graph tools
-	agentsGraph := agentsgraph.NewAgentsGraph()
-	graphManager := agentsgraph.NewAgentsGraphManager(agentsGraph)
-	for _, tool := range graphManager.GetTools() {
-		if err := reg.Register(tool); err != nil {
-			fmt.Printf("Warning: Failed to register agents graph tool: %v\n", err)
-		}
-	}
-
-	// Register vulnerability reporting tool
-	registerVulnerabilityTool(reg)
-
-	fmt.Printf("Registered %d tools\n", reg.Count())
 
 	// Initialize executor
 	execConfig := executor.DefaultExecutorConfig()
